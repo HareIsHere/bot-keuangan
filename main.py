@@ -17,6 +17,8 @@ def get_gsheet_client():
     ]
     credentials = ServiceAccountCredentials.from_json_keyfile_dict(google_creds, scope)
     return gspread.authorize(credentials)
+print("GOOGLE_CREDENTIALS exists?", "GOOGLE_CREDENTIALS" in os.environ)
+
 
 SPREADSHEET_NAME = os.environ.get("SPREADSHEET_NAME", "Pencatatan Keuangan")
 gc = get_gsheet_client()
@@ -110,3 +112,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
