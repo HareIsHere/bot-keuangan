@@ -1,29 +1,13 @@
 import os
-import json
 import datetime
-import gspread
-from oauth2client.service_account import ServiceAccountCredentials
 from telegram import Update
 from telegram.ext import Application, CommandHandler, ContextTypes
+from credentials import get_gsheet_client
 
-# === Google Sheets Setup ===
-def get_gsheet_client():
-    google_creds = json.loads(os.environ["GOOGLE_CREDENTIALS"])
-    scope = [
-        "https://spreadsheets.google.com/feeds",
-        "https://www.googleapis.com/auth/spreadsheets",
-        "https://www.googleapis.com/auth/drive.file",
-        "https://www.googleapis.com/auth/drive"
-    ]
-    credentials = ServiceAccountCredentials.from_json_keyfile_dict(google_creds, scope)
-    return gspread.authorize(credentials)
-print("GOOGLE_CREDENTIALS exists?", "GOOGLE_CREDENTIALS" in os.environ)
-
-
-SPREADSHEET_NAME = os.environ.get("SPREADSHEET_NAME", "Pencatatan Keuangan")
+# --- Setup Google Sheets ---
+SPREADSHEET_NAME = "Pencatatan Keuangan"  # ganti sesuai nama sheet kamu
 gc = get_gsheet_client()
 
-# === Helper: ambil / buat worksheet bulanan ===
 def get_monthly_sheet():
     today = datetime.date.today()
     sheet_name = f"{today.year}-{today.month:02d}"
@@ -31,66 +15,31 @@ def get_monthly_sheet():
     file = gc.open(SPREADSHEET_NAME)
     try:
         sheet = file.worksheet(sheet_name)
-    except gspread.exceptions.WorksheetNotFound:
+    except:
+        # buat worksheet baru kalau belum ada
         sheet = file.add_worksheet(title=sheet_name, rows=500, cols=4)
         sheet.append_row(["Tanggal", "Kategori", "Deskripsi", "Nominal"])
     return sheet
 
-# === Helper: ambil / buat worksheet rekap ===
-def get_rekap_sheet():
-    file = gc.open(SPREADSHEET_NAME)
-    try:
-        sheet = file.worksheet("Rekap")
-    except gspread.exceptions.WorksheetNotFound:
-        sheet = file.add_worksheet(title="Rekap", rows=20, cols=5)
-        sheet.append_row(["Tahun", "Bulan", "Total Pengeluaran"])
-    return sheet
-
-# === Update rekap tahunan ===
-def update_rekap(nominal: int):
-    today = datetime.date.today()
-    tahun = today.year
-    bulan = today.month
-
-    sheet = get_rekap_sheet()
-    records = sheet.get_all_records()
-
-    # cek apakah sudah ada entry untuk tahun & bulan ini
-    found = False
-    for i, row in enumerate(records, start=2):  # mulai dari baris ke-2 (header di baris 1)
-        if row["Tahun"] == tahun and row["Bulan"] == bulan:
-            total = int(row["Total Pengeluaran"]) + nominal
-            sheet.update_cell(i, 3, total)  # kolom C = Total Pengeluaran
-            found = True
-            break
-
-    # kalau belum ada, tambah baris baru
-    if not found:
-        sheet.append_row([tahun, bulan, nominal])
-
-# === Command: /start ===
+# --- Command Handler: /start ---
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "Halo! 🎉\nKirim catatan keuangan dengan format:\n"
-        "/catat <kategori> <deskripsi> <nominal>\n\n"
-        "Contoh: /catat Makan SotoAyam 25000"
+        "Halo! Kirim catatan keuangan dengan format:\n"
+        "/catat <kategori> <deskripsi> <nominal>\n"
+        "Gunakan /rekap untuk lihat total bulan ini."
     )
 
-# === Command: /catat ===
+# --- Command Handler: /catat ---
 async def catat(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         kategori = context.args[0]
         nominal = int(context.args[-1])
         deskripsi = " ".join(context.args[1:-1])
 
-        # tulis ke sheet bulanan
         sheet = get_monthly_sheet()
         today = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+
         sheet.append_row([today, kategori, deskripsi, nominal])
-
-        # update rekap tahunan
-        update_rekap(nominal)
-
         await update.message.reply_text(
             f"✅ Tercatat: {kategori} - {deskripsi} Rp{nominal:,}"
         )
@@ -99,17 +48,43 @@ async def catat(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"⚠️ Format salah.\nGunakan: /catat <kategori> <deskripsi> <nominal>\nError: {e}"
         )
 
-# === Main App ===
-def main():
-    token = os.environ["BOT_TOKEN"]
-    app = Application.builder().token(token).build()
+# --- Command Handler: /rekap ---
+async def rekap(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    try:
+        sheet = get_monthly_sheet()
+        records = sheet.get_all_records()
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("catat", catat))
+        if not records:
+            await update.message.reply_text("📊 Belum ada catatan bulan ini.")
+            return
 
-    print("Bot jalan... 🚀")
-    app.run_polling()
+        total = sum(row["Nominal"] for row in records)
+        # Rekap per kategori
+        kategori_total = {}
+        for row in records:
+            kategori = row["Kategori"]
+            kategori_total[kategori] = kategori_total.get(kategori, 0) + row["Nominal"]
+
+        # Buat output
+        pesan = "📊 Rekap Bulan Ini:\n"
+        for k, v in kategori_total.items():
+            pesan += f"- {k}: Rp{v:,}\n"
+        pesan += f"\n💰 Total: Rp{total:,}"
+
+        await update.message.reply_text(pesan)
+    except Exception as e:
+        await update.message.reply_text(f"⚠️ Gagal ambil rekap: {e}")
+
+# --- Setup Bot ---
+TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
+if not TOKEN:
+    raise ValueError("⚠️ TELEGRAM_BOT_TOKEN tidak ditemukan di environment!")
+
+app = Application.builder().token(TOKEN).build()
+app.add_handler(CommandHandler("start", start))
+app.add_handler(CommandHandler("catat", catat))
+app.add_handler(CommandHandler("rekap", rekap))
 
 if __name__ == "__main__":
-    main()
-
+    print("Bot jalan... 🚀")
+    app.run_polling()
